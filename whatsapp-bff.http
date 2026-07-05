@@ -1,0 +1,6 @@
+@whatsapp_bff_HostAddress = http://localhost:5153
+
+GET {{whatsapp_bff_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
