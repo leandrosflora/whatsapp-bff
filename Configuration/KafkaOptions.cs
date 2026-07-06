@@ -7,4 +7,6 @@ public class KafkaOptions
     public string BootstrapServers { get; set; } = string.Empty;
     public string MessageReceivedTopic { get; set; } = string.Empty;
     public string MessageStatusTopic { get; set; } = string.Empty;
+    public string RawWebhookReceivedTopic { get; set; } = string.Empty;
+    public string WebhookConsumerGroupId { get; set; } = "whatsapp-bff-webhook-consumer";
 }

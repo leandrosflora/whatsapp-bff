@@ -38,7 +38,6 @@ builder.Services.AddOptions<KafkaOptions>()
 
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<IMessageDedupeStore, MemoryCacheMessageDedupeStore>();
-builder.Services.AddSingleton<IInboundWebhookQueue, InboundWebhookQueue>();
 builder.Services.AddSingleton<IWhatsAppPayloadMapper, WhatsAppPayloadMapper>();
 builder.Services.AddSingleton<IOutboundMessageTracker, InMemoryOutboundMessageTracker>();
 
@@ -67,12 +66,25 @@ builder.Services.AddSingleton<IProducer<string, string>>(sp =>
 });
 builder.Services.AddSingleton<IChannelEventPublisher, KafkaChannelEventPublisher>();
 
+builder.Services.AddSingleton<IConsumer<string, string>>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<KafkaOptions>>().Value;
+    var config = new ConsumerConfig
+    {
+        BootstrapServers = options.BootstrapServers,
+        GroupId = options.WebhookConsumerGroupId,
+        AutoOffsetReset = AutoOffsetReset.Earliest,
+        EnableAutoCommit = false
+    };
+    return new ConsumerBuilder<string, string>(config).Build();
+});
+
 // Transient (not Scoped): ProcessInboundWebhookUseCase is consumed by the singleton
-// InboundWebhookProcessingService BackgroundService, which cannot depend on a scoped service.
+// KafkaWebhookConsumerService BackgroundService, which cannot depend on a scoped service.
 builder.Services.AddTransient<IProcessInboundWebhookUseCase, ProcessInboundWebhookUseCase>();
 builder.Services.AddTransient<ISendOutboundMessageUseCase, SendOutboundMessageUseCase>();
 
-builder.Services.AddHostedService<InboundWebhookProcessingService>();
+builder.Services.AddHostedService<KafkaWebhookConsumerService>();
 
 var app = builder.Build();
 

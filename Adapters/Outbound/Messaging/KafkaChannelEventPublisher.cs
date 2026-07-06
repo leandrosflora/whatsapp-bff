@@ -18,6 +18,21 @@ public class KafkaChannelEventPublisher(
     public Task PublishMessageStatusAsync(MessageStatusEvent statusEvent, CancellationToken cancellationToken) =>
         PublishAsync(options.Value.MessageStatusTopic, statusEvent.ConversationId, statusEvent, statusEvent.MessageId, cancellationToken);
 
+    public async Task PublishRawWebhookReceivedAsync(
+        string correlationId, string partitionKey, string rawJson, CancellationToken cancellationToken)
+    {
+        // Deliberately not wrapped in try/catch: the webhook endpoint must know if this failed
+        // so it can reject the delivery (503) instead of acking a message that was never persisted.
+        var message = new Message<string, string>
+        {
+            Key = partitionKey,
+            Value = rawJson,
+            Headers = new Headers { { "CorrelationId", System.Text.Encoding.UTF8.GetBytes(correlationId) } }
+        };
+
+        await producer.ProduceAsync(options.Value.RawWebhookReceivedTopic, message, cancellationToken);
+    }
+
     private async Task PublishAsync<T>(
         string topic, string partitionKey, T value, string messageId, CancellationToken cancellationToken)
     {

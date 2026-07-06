@@ -10,11 +10,13 @@ public class ProcessInboundWebhookUseCase(
     IOutboundMessageTracker outboundMessageTracker,
     ILogger<ProcessInboundWebhookUseCase> logger) : IProcessInboundWebhookUseCase
 {
-    public async Task ExecuteAsync(
+    public async Task<bool> ExecuteAsync(
         IReadOnlyList<InboundChannelMessage> messages,
         IReadOnlyList<MessageStatusEvent> statusEvents,
         CancellationToken cancellationToken)
     {
+        var allForwarded = true;
+
         foreach (var message in messages)
         {
             var forwarded = await orchestratorClient.ForwardMessageAsync(message, cancellationToken);
@@ -28,6 +30,7 @@ public class ProcessInboundWebhookUseCase(
             }
             else
             {
+                allForwarded = false;
                 logger.LogWarning(
                     "Inbound message {MessageId} from {ConversationId} was not forwarded to the Orchestrator",
                     message.MessageId,
@@ -54,5 +57,7 @@ public class ProcessInboundWebhookUseCase(
                 reconciled.MessageId,
                 reconciled.IsKnownMessage);
         }
+
+        return allForwarded;
     }
 }

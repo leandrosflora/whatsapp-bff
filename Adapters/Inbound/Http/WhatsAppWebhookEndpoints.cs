@@ -1,7 +1,6 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
-using whatsapp_bff.Adapters.Inbound.Messaging;
 using whatsapp_bff.Application.Ports.Outbound;
 using whatsapp_bff.Configuration;
 
@@ -38,7 +37,7 @@ public static class WhatsAppWebhookEndpoints
         HttpRequest request,
         IOptions<WhatsAppOptions> whatsAppOptions,
         IMessageDedupeStore dedupeStore,
-        IInboundWebhookQueue queue,
+        IChannelEventPublisher eventPublisher,
         ILogger<InboundWebhookLogCategory> logger,
         CancellationToken cancellationToken)
     {
@@ -82,12 +81,50 @@ public static class WhatsAppWebhookEndpoints
         }
 
         var rawJson = System.Text.Encoding.UTF8.GetString(rawBytes);
-        await queue.EnqueueAsync(
-            new RawWebhookEnvelope(payload, rawJson, DateTimeOffset.UtcNow, correlationId), cancellationToken);
 
-        logger.LogInformation("Enqueued WhatsApp webhook delivery for background processing");
+        try
+        {
+            var partitionKey = ResolvePartitionKey(payload, correlationId);
+            await eventPublisher.PublishRawWebhookReceivedAsync(correlationId, partitionKey, rawJson, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // The delivery was not durably recorded: reject it so the channel provider retries,
+            // instead of acking a webhook that a crash could otherwise lose before a consumer
+            // ever reads it back off the topic. Kafka is the queue now, not an in-memory buffer.
+            logger.LogError(ex, "Failed to persist raw WhatsApp webhook delivery to Kafka; rejecting delivery");
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
+
+        logger.LogInformation("Persisted raw webhook delivery to Kafka");
 
         return Results.Ok();
+    }
+
+    private static string ResolvePartitionKey(WhatsAppWebhookPayload payload, string fallback)
+    {
+        var messageFrom = payload.Entry
+            .SelectMany(entry => entry.Changes)
+            .Select(change => change.Value)
+            .Where(value => value?.Messages is not null)
+            .SelectMany(value => value!.Messages!)
+            .Select(message => message.From)
+            .FirstOrDefault(from => !string.IsNullOrEmpty(from));
+
+        if (!string.IsNullOrEmpty(messageFrom))
+        {
+            return messageFrom;
+        }
+
+        var statusRecipient = payload.Entry
+            .SelectMany(entry => entry.Changes)
+            .Select(change => change.Value)
+            .Where(value => value?.Statuses is not null)
+            .SelectMany(value => value!.Statuses!)
+            .Select(status => status.RecipientId)
+            .FirstOrDefault(recipient => !string.IsNullOrEmpty(recipient));
+
+        return !string.IsNullOrEmpty(statusRecipient) ? statusRecipient! : fallback;
     }
 
     private static bool IsDuplicateDelivery(WhatsAppWebhookPayload payload, IMessageDedupeStore dedupeStore)
