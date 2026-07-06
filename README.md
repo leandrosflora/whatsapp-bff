@@ -105,6 +105,7 @@ Validações atuais:
 
 - `to` é obrigatório.
 - `text` é obrigatório.
+- `type` existe no contrato, mas a implementação atual envia apenas texto.
 
 Respostas:
 
@@ -241,13 +242,20 @@ A chamada usa `HttpClient` com retry configurado no ASP.NET resilience handler.
 - O `CorrelationId` é propagado no header da mensagem Kafka bruta.
 - Logs de escopo são renderizados no console.
 
+## Segurança
+
+- `AccessToken`, `AppSecret` e `VerifyToken` devem ser tratados como segredo.
+- A validação do webhook depende de `X-Hub-Signature-256`.
+- O endpoint `/internal/messages` não tem autenticação/autorização própria nesta implementação; proteja por gateway, rede privada ou camada superior antes de produção.
+
 ## Limitações atuais
 
 - Deduplicação é em memória; reinício da aplicação limpa o estado.
 - Rastreamento de mensagens outbound conhecidas é em memória.
-- O endpoint outbound valida `type`, mas a implementação atual envia apenas mensagem de texto.
+- O contrato outbound contém `type`, mas o envio implementado é apenas texto.
 - Não há Dockerfile no repositório.
 - Não há provisionamento local de Kafka no repositório.
+- Não há testes automatizados versionados no repositório.
 
 ## Comandos úteis
 
