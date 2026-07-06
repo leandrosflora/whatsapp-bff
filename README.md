@@ -30,6 +30,8 @@ flowchart LR
     BFF -->|send message| WA
 ```
 
+Para o passo a passo detalhado dessa jornada — incluindo o que acontece do lado do Orchestrator, do agente de IA e do Core Bancário — ver [Diagramas de sequência da jornada](docs/sequence-diagrams.md).
+
 ## Stack
 
 - .NET 8 / ASP.NET Core Minimal APIs
