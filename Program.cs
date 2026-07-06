@@ -1,12 +1,15 @@
 using Confluent.Kafka;
 using Microsoft.Extensions.Options;
+using whatsapp_bff.Adapters.Inbound.Http;
+using whatsapp_bff.Adapters.Inbound.Http.Mapping;
+using whatsapp_bff.Adapters.Inbound.Messaging;
+using whatsapp_bff.Adapters.Outbound.Http;
+using whatsapp_bff.Adapters.Outbound.Messaging;
+using whatsapp_bff.Adapters.Outbound.Persistence;
+using whatsapp_bff.Application.Ports.Inbound;
+using whatsapp_bff.Application.Ports.Outbound;
+using whatsapp_bff.Application.UseCases;
 using whatsapp_bff.Configuration;
-using whatsapp_bff.Events;
-using whatsapp_bff.Mapping;
-using whatsapp_bff.Orchestrator;
-using whatsapp_bff.Outbound;
-using whatsapp_bff.Processing;
-using whatsapp_bff.Webhooks;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -63,6 +66,11 @@ builder.Services.AddSingleton<IProducer<string, string>>(sp =>
     return new ProducerBuilder<string, string>(config).Build();
 });
 builder.Services.AddSingleton<IChannelEventPublisher, KafkaChannelEventPublisher>();
+
+// Transient (not Scoped): ProcessInboundWebhookUseCase is consumed by the singleton
+// InboundWebhookProcessingService BackgroundService, which cannot depend on a scoped service.
+builder.Services.AddTransient<IProcessInboundWebhookUseCase, ProcessInboundWebhookUseCase>();
+builder.Services.AddTransient<ISendOutboundMessageUseCase, SendOutboundMessageUseCase>();
 
 builder.Services.AddHostedService<InboundWebhookProcessingService>();
 
