@@ -74,7 +74,12 @@ builder.Services.AddSingleton<IConsumer<string, string>>(sp =>
         BootstrapServers = options.BootstrapServers,
         GroupId = options.WebhookConsumerGroupId,
         AutoOffsetReset = AutoOffsetReset.Earliest,
-        EnableAutoCommit = false
+        EnableAutoCommit = false,
+        // librdkafka defaults this to false regardless of the broker's own
+        // auto.create.topics.enable, so a consumer started before any producer
+        // has touched the topic fails with "Unknown topic or partition" instead
+        // of creating it.
+        AllowAutoCreateTopics = true
     };
     return new ConsumerBuilder<string, string>(config).Build();
 });
