@@ -1,5 +1,7 @@
 using Confluent.Kafka;
 using Microsoft.Extensions.Options;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using whatsapp_bff.Adapters.Inbound.Http;
 using whatsapp_bff.Adapters.Inbound.Http.Mapping;
 using whatsapp_bff.Adapters.Inbound.Messaging;
@@ -35,6 +37,17 @@ builder.Services.AddOptions<OrchestratorOptions>()
     .Bind(builder.Configuration.GetSection(OrchestratorOptions.SectionName));
 builder.Services.AddOptions<KafkaOptions>()
     .Bind(builder.Configuration.GetSection(KafkaOptions.SectionName));
+builder.Services.AddOptions<OtelOptions>()
+    .Bind(builder.Configuration.GetSection(OtelOptions.SectionName));
+
+var otelEndpoint = builder.Configuration.GetSection(OtelOptions.SectionName).Get<OtelOptions>()?.OtlpEndpoint
+    ?? "http://localhost:4317";
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService("whatsapp-bff"))
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddOtlpExporter(otlp => otlp.Endpoint = new Uri(otelEndpoint)));
 
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<IMessageDedupeStore, MemoryCacheMessageDedupeStore>();
