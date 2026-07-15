@@ -63,6 +63,18 @@ builder.Services.AddHttpClient<IOrchestratorClient, OrchestratorClient>((sp, cli
     {
         options.Retry.MaxRetryAttempts = 2;
         options.Retry.Delay = TimeSpan.FromMilliseconds(200);
+        // Orchestrator's own processing (OpenAI + MCP tool round trips) routinely takes
+        // longer than the framework's 10s AttemptTimeout default. When that happened, this
+        // client gave up and retried while Orchestrator was still legitimately working,
+        // producing a second POST /messages for the same inbound message - Orchestrator has
+        // no MessageId dedupe, so the message (and its OpenAI calls) got processed twice.
+        // 30s matches Orchestrator's own worst-case downstream budget so a single attempt
+        // has room to finish; TotalRequestTimeout must exceed AttemptTimeout, and by only a
+        // little, since a second 30s attempt would just recreate the duplicate-processing
+        // problem this is fixing. CircuitBreaker.SamplingDuration must be >= 2x AttemptTimeout.
+        options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(30);
+        options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(35);
+        options.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(60);
     });
 
 builder.Services.AddHttpClient<IWhatsAppCloudApiClient, WhatsAppCloudApiClient>((sp, client) =>
