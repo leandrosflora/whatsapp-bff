@@ -74,9 +74,17 @@ public static class WhatsAppWebhookEndpoints
             return Results.BadRequest();
         }
 
-        if (IsDuplicateDelivery(payload, dedupeStore))
+        var reservation = ReserveMessageIds(payload, dedupeStore);
+        if (reservation.HasInProgress)
         {
-            logger.LogInformation("Dropped duplicate WhatsApp webhook delivery");
+            ReleaseReservations(reservation.AcquiredMessageIds, dedupeStore);
+            logger.LogWarning("A concurrent delivery for the same WhatsApp message is still being persisted; requesting redelivery");
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
+
+        if (reservation.HasMessageIds && reservation.AcquiredMessageIds.Count == 0)
+        {
+            logger.LogInformation("Dropped duplicate WhatsApp webhook delivery already persisted to Kafka");
             return Results.Ok();
         }
 
@@ -86,18 +94,24 @@ public static class WhatsAppWebhookEndpoints
         {
             var partitionKey = ResolvePartitionKey(payload, correlationId);
             await eventPublisher.PublishRawWebhookReceivedAsync(correlationId, partitionKey, rawJson, cancellationToken);
+
+            foreach (var messageId in reservation.AcquiredMessageIds)
+            {
+                dedupeStore.MarkCompleted(messageId);
+            }
         }
         catch (Exception ex)
         {
-            // The delivery was not durably recorded: reject it so the channel provider retries,
-            // instead of acking a webhook that a crash could otherwise lose before a consumer
-            // ever reads it back off the topic. Kafka is the queue now, not an in-memory buffer.
+            ReleaseReservations(reservation.AcquiredMessageIds, dedupeStore);
+
+            // The delivery was not durably recorded: reject it so the channel provider retries.
+            // Reservations are released before returning 503, otherwise the redelivery would be
+            // incorrectly acknowledged as a duplicate even though Kafka never stored the payload.
             logger.LogError(ex, "Failed to persist raw WhatsApp webhook delivery to Kafka; rejecting delivery");
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
 
         logger.LogInformation("Persisted raw webhook delivery to Kafka");
-
         return Results.Ok();
     }
 
@@ -127,7 +141,9 @@ public static class WhatsAppWebhookEndpoints
         return !string.IsNullOrEmpty(statusRecipient) ? statusRecipient! : fallback;
     }
 
-    private static bool IsDuplicateDelivery(WhatsAppWebhookPayload payload, IMessageDedupeStore dedupeStore)
+    private static DedupeReservation ReserveMessageIds(
+        WhatsAppWebhookPayload payload,
+        IMessageDedupeStore dedupeStore)
     {
         var messageIds = payload.Entry
             .SelectMany(entry => entry.Changes)
@@ -135,19 +151,53 @@ public static class WhatsAppWebhookEndpoints
             .Where(value => value?.Messages is not null)
             .SelectMany(value => value!.Messages!)
             .Select(message => message.Id)
-            .Where(id => id is not null)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
             .Cast<string>()
+            .Distinct(StringComparer.Ordinal)
             .ToList();
 
         if (messageIds.Count == 0)
         {
-            return false;
+            return new DedupeReservation([], HasMessageIds: false, HasInProgress: false);
         }
 
-        // TryMarkProcessed has a side effect (marks as seen), so evaluate all before short-circuiting.
-        var results = messageIds.Select(dedupeStore.TryMarkProcessed).ToList();
-        return results.All(isNew => !isNew);
+        var acquired = new List<string>();
+        var hasInProgress = false;
+
+        foreach (var messageId in messageIds)
+        {
+            switch (dedupeStore.TryReserve(messageId))
+            {
+                case MessageDedupeReservationStatus.Acquired:
+                    acquired.Add(messageId);
+                    break;
+                case MessageDedupeReservationStatus.InProgress:
+                    hasInProgress = true;
+                    break;
+                case MessageDedupeReservationStatus.Completed:
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+        }
+
+        return new DedupeReservation(acquired, HasMessageIds: true, HasInProgress: hasInProgress);
     }
+
+    private static void ReleaseReservations(
+        IReadOnlyCollection<string> messageIds,
+        IMessageDedupeStore dedupeStore)
+    {
+        foreach (var messageId in messageIds)
+        {
+            dedupeStore.Release(messageId);
+        }
+    }
+
+    private sealed record DedupeReservation(
+        IReadOnlyList<string> AcquiredMessageIds,
+        bool HasMessageIds,
+        bool HasInProgress);
 }
 
 public sealed class InboundWebhookLogCategory;
