@@ -100,7 +100,7 @@ public sealed class PlatformMetrics
     private static string MetricKey(string metricName, params (string Name, string Value)[] labels)
     {
         if (labels.Length == 0) return metricName;
-        var rendered = string.Join(',', labels.Select(label =>
+        var rendered = string.Join(",", labels.Select(label =>
             $"{Sanitize(label.Name)}=\"{Escape(label.Value)}\""));
         return $"{Sanitize(metricName)}{{{rendered}}}";
     }
