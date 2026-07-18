@@ -181,7 +181,7 @@ public static class WhatsAppWebhookEndpoints
             }
         }
 
-        return new DedupeReservation(acquired, HasMessageIds: true, hasInProgress);
+        return new DedupeReservation(acquired, HasMessageIds: true, HasInProgress: hasInProgress);
     }
 
     private static void ReleaseReservations(
