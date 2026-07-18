@@ -7,7 +7,8 @@ public static class OutboundMessageEndpoints
 {
     public static IEndpointRouteBuilder MapOutboundMessageEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapPost("/internal/messages", HandleSendAsync);
+        endpoints.MapPost("/internal/messages", HandleSendAsync)
+            .RequireAuthorization();
         return endpoints;
     }
 
@@ -22,7 +23,6 @@ public static class OutboundMessageEndpoints
         }
 
         var result = await useCase.ExecuteAsync(request, cancellationToken);
-
         return result.Success
             ? Results.Accepted(value: new { messageId = result.MessageId })
             : Results.Problem(detail: result.ErrorMessage, statusCode: StatusCodes.Status502BadGateway);
