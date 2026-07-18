@@ -1,4 +1,5 @@
 using Confluent.Kafka;
+using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Options;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -12,17 +13,14 @@ using whatsapp_bff.Application.Ports.Inbound;
 using whatsapp_bff.Application.Ports.Outbound;
 using whatsapp_bff.Application.UseCases;
 using whatsapp_bff.Configuration;
+using whatsapp_bff.Platform;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddPlatformServices(builder.Configuration);
 
-// Attach distributed-trace IDs to every log scope and render scopes in console output,
-// so a single WhatsApp webhook delivery can be correlated across ingestion, Orchestrator
-// calls, Kafka publishing, and outbound send.
 builder.Logging.Configure(options =>
 {
     options.ActivityTrackingOptions = ActivityTrackingOptions.TraceId
@@ -45,6 +43,7 @@ var otelEndpoint = builder.Configuration.GetSection(OtelOptions.SectionName).Get
 builder.Services.AddOpenTelemetry()
     .ConfigureResource(resource => resource.AddService("whatsapp-bff"))
     .WithTracing(tracing => tracing
+        .AddSource(KafkaWebhookConsumerService.ActivitySourceName)
         .AddAspNetCoreInstrumentation()
         .AddHttpClientInstrumentation()
         .AddOtlpExporter(otlp => otlp.Endpoint = new Uri(otelEndpoint)));
@@ -59,19 +58,14 @@ builder.Services.AddHttpClient<IOrchestratorClient, OrchestratorClient>((sp, cli
         var options = sp.GetRequiredService<IOptions<OrchestratorOptions>>().Value;
         client.BaseAddress = new Uri(options.BaseUrl);
     })
+    .AddHttpMessageHandler(sp => new InternalAuthHandler(
+        sp.GetRequiredService<InternalTokenService>(),
+        "conversation-orchestrator"))
     .AddStandardResilienceHandler(options =>
     {
         options.Retry.MaxRetryAttempts = 2;
         options.Retry.Delay = TimeSpan.FromMilliseconds(200);
-        // Orchestrator's own processing (OpenAI + MCP tool round trips) routinely takes
-        // longer than the framework's 10s AttemptTimeout default. When that happened, this
-        // client gave up and retried while Orchestrator was still legitimately working,
-        // producing a second POST /messages for the same inbound message - Orchestrator has
-        // no MessageId dedupe, so the message (and its OpenAI calls) got processed twice.
-        // 30s matches Orchestrator's own worst-case downstream budget so a single attempt
-        // has room to finish; TotalRequestTimeout must exceed AttemptTimeout, and by only a
-        // little, since a second 30s attempt would just recreate the duplicate-processing
-        // problem this is fixing. CircuitBreaker.SamplingDuration must be >= 2x AttemptTimeout.
+        options.Retry.DisableForUnsafeHttpMethods();
         options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(30);
         options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(35);
         options.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(60);
@@ -86,39 +80,42 @@ builder.Services.AddHttpClient<IWhatsAppCloudApiClient, WhatsAppCloudApiClient>(
 builder.Services.AddSingleton<IProducer<string, string>>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<KafkaOptions>>().Value;
-    var config = new ProducerConfig { BootstrapServers = options.BootstrapServers };
-    return new ProducerBuilder<string, string>(config).Build();
+    return new ProducerBuilder<string, string>(new ProducerConfig
+    {
+        BootstrapServers = options.BootstrapServers,
+        EnableIdempotence = true,
+        Acks = Acks.All
+    }).Build();
 });
 builder.Services.AddSingleton<IChannelEventPublisher, KafkaChannelEventPublisher>();
 
 builder.Services.AddSingleton<IConsumer<string, string>>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<KafkaOptions>>().Value;
-    var config = new ConsumerConfig
+    return new ConsumerBuilder<string, string>(new ConsumerConfig
     {
         BootstrapServers = options.BootstrapServers,
         GroupId = options.WebhookConsumerGroupId,
         AutoOffsetReset = AutoOffsetReset.Earliest,
         EnableAutoCommit = false,
-        // librdkafka defaults this to false regardless of the broker's own
-        // auto.create.topics.enable, so a consumer started before any producer
-        // has touched the topic fails with "Unknown topic or partition" instead
-        // of creating it.
-        AllowAutoCreateTopics = true
-    };
-    return new ConsumerBuilder<string, string>(config).Build();
+        AllowAutoCreateTopics = false
+    }).Build();
+});
+builder.Services.AddSingleton<IAdminClient>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<KafkaOptions>>().Value;
+    return new AdminClientBuilder(new AdminClientConfig
+    {
+        BootstrapServers = options.BootstrapServers
+    }).Build();
 });
 
-// Transient (not Scoped): ProcessInboundWebhookUseCase is consumed by the singleton
-// KafkaWebhookConsumerService BackgroundService, which cannot depend on a scoped service.
 builder.Services.AddTransient<IProcessInboundWebhookUseCase, ProcessInboundWebhookUseCase>();
 builder.Services.AddTransient<ISendOutboundMessageUseCase, SendOutboundMessageUseCase>();
-
 builder.Services.AddHostedService<KafkaWebhookConsumerService>();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -126,6 +123,30 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.UsePlatformServices();
+app.MapPlatformEndpoints();
+app.MapGet("/health/ready", (
+    IAdminClient adminClient,
+    IOptions<InternalAuthOptions> authOptions) =>
+{
+    var failures = new List<string>();
+    if (string.IsNullOrWhiteSpace(authOptions.Value.SigningKey))
+    {
+        failures.Add("internal_auth_signing_key_missing");
+    }
+    try
+    {
+        adminClient.GetMetadata(TimeSpan.FromSeconds(2));
+    }
+    catch
+    {
+        failures.Add("kafka_unavailable");
+    }
+
+    return failures.Count == 0
+        ? Results.Ok(new { status = "ready", failures })
+        : Results.Json(new { status = "not_ready", failures }, statusCode: StatusCodes.Status503ServiceUnavailable);
+}).AllowAnonymous();
 
 app.MapWhatsAppWebhookEndpoints();
 app.MapOutboundMessageEndpoints();
