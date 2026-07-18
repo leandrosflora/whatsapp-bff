@@ -57,6 +57,7 @@ builder.Services.AddHttpClient<IOrchestratorClient, OrchestratorClient>((sp, cli
     {
         var options = sp.GetRequiredService<IOptions<OrchestratorOptions>>().Value;
         client.BaseAddress = new Uri(options.BaseUrl);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("X-Tenant-Id", options.TenantId);
     })
     .AddHttpMessageHandler(sp => new InternalAuthHandler(
         sp.GetRequiredService<InternalTokenService>(),
