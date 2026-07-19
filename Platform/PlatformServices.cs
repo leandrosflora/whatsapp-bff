@@ -5,8 +5,10 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using whatsapp_bff.Configuration;
 
 namespace whatsapp_bff.Platform;
 
@@ -19,14 +21,43 @@ public sealed class InternalAuthOptions
     public int TokenTtlSeconds { get; init; } = 300;
 }
 
+public static class TenantClaims
+{
+    public const string ClaimType = "tenant_id";
+
+    public static bool TryNormalize(string? value, out string tenantId)
+    {
+        tenantId = string.Empty;
+        if (!Guid.TryParse(value?.Trim(), out var parsed) || parsed == Guid.Empty)
+        {
+            return false;
+        }
+        tenantId = parsed.ToString("D");
+        return true;
+    }
+
+    public static bool Matches(ClaimsPrincipal principal, string? headerTenant, out string tenantId)
+    {
+        tenantId = string.Empty;
+        return TryNormalize(headerTenant, out var header)
+            && TryNormalize(principal.FindFirstValue(ClaimType), out var claim)
+            && string.Equals(header, claim, StringComparison.Ordinal)
+            && ((tenantId = claim) is not null);
+    }
+}
+
 public sealed class InternalTokenService(IOptions<InternalAuthOptions> options)
 {
-    public string CreateToken(string audience)
+    public string CreateToken(string audience, string tenantId)
     {
         var value = options.Value;
-        if (string.IsNullOrWhiteSpace(value.SigningKey))
+        if (Encoding.UTF8.GetByteCount(value.SigningKey) < 32)
         {
-            throw new InvalidOperationException("InternalAuth:SigningKey is required.");
+            throw new InvalidOperationException("InternalAuth:SigningKey must contain at least 32 UTF-8 bytes.");
+        }
+        if (!TenantClaims.TryNormalize(tenantId, out var canonicalTenant))
+        {
+            throw new ArgumentException("Tenant ID must be a non-empty UUID.", nameof(tenantId));
         }
 
         var now = DateTime.UtcNow;
@@ -36,9 +67,14 @@ public sealed class InternalTokenService(IOptions<InternalAuthOptions> options)
         var token = new JwtSecurityToken(
             issuer: value.Issuer,
             audience: audience,
-            claims: [new Claim(JwtRegisteredClaimNames.Sub, value.ServiceName)],
+            claims:
+            [
+                new Claim(JwtRegisteredClaimNames.Sub, value.ServiceName),
+                new Claim(TenantClaims.ClaimType, canonicalTenant),
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("n"))
+            ],
             notBefore: now,
-            expires: now.AddSeconds(Math.Max(30, value.TokenTtlSeconds)),
+            expires: now.AddSeconds(Math.Clamp(value.TokenTtlSeconds, 30, 900)),
             signingCredentials: credentials);
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
@@ -46,13 +82,20 @@ public sealed class InternalTokenService(IOptions<InternalAuthOptions> options)
 
 public sealed class InternalAuthHandler(
     InternalTokenService tokenService,
+    IOptions<OrchestratorOptions> orchestratorOptions,
     string audience) : DelegatingHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
         CancellationToken cancellationToken)
     {
-        request.Headers.Authorization = new("Bearer", tokenService.CreateToken(audience));
+        if (!TenantClaims.TryNormalize(orchestratorOptions.Value.TenantId, out var tenantId))
+        {
+            throw new InvalidOperationException("Orchestrator:TenantId must be a non-empty UUID.");
+        }
+        request.Headers.Authorization = new("Bearer", tokenService.CreateToken(audience, tenantId));
+        request.Headers.Remove("X-Tenant-Id");
+        request.Headers.TryAddWithoutValidation("X-Tenant-Id", tenantId);
         return base.SendAsync(request, cancellationToken);
     }
 }
@@ -73,10 +116,8 @@ public sealed class PlatformMetrics
         _durationCounts.AddOrUpdate(durationKey, 1, (_, current) => current + 1);
     }
 
-    public void Increment(string metricName, params (string Name, string Value)[] labels)
-    {
+    public void Increment(string metricName, params (string Name, string Value)[] labels) =>
         _counters.AddOrUpdate(MetricKey(metricName, labels), 1, (_, current) => current + 1);
-    }
 
     public string RenderPrometheus()
     {
@@ -87,11 +128,10 @@ public sealed class PlatformMetrics
         }
         foreach (var item in _durationCounts.OrderBy(item => item.Key))
         {
-            var baseKey = item.Key;
-            _durationSums.TryGetValue(baseKey, out var sum);
-            builder.Append(baseKey.Replace("_seconds", "_seconds_count", StringComparison.Ordinal))
+            _durationSums.TryGetValue(item.Key, out var sum);
+            builder.Append(item.Key.Replace("_seconds", "_seconds_count", StringComparison.Ordinal))
                 .Append(' ').Append(item.Value).AppendLine();
-            builder.Append(baseKey.Replace("_seconds", "_seconds_sum", StringComparison.Ordinal))
+            builder.Append(item.Key.Replace("_seconds", "_seconds_sum", StringComparison.Ordinal))
                 .Append(' ').Append(sum.ToString(System.Globalization.CultureInfo.InvariantCulture)).AppendLine();
         }
         return builder.ToString();
@@ -100,8 +140,7 @@ public sealed class PlatformMetrics
     private static string MetricKey(string metricName, params (string Name, string Value)[] labels)
     {
         if (labels.Length == 0) return metricName;
-        var rendered = string.Join(",", labels.Select(label =>
-            $"{Sanitize(label.Name)}=\"{Escape(label.Value)}\""));
+        var rendered = string.Join(",", labels.Select(label => $"{Sanitize(label.Name)}=\"{Escape(label.Value)}\""));
         return $"{Sanitize(metricName)}{{{rendered}}}";
     }
 
@@ -116,9 +155,7 @@ public sealed class PlatformMetrics
     }
 }
 
-public sealed class PlatformMetricsMiddleware(
-    RequestDelegate next,
-    PlatformMetrics metrics)
+public sealed class PlatformMetricsMiddleware(RequestDelegate next, PlatformMetrics metrics)
 {
     public async Task InvokeAsync(HttpContext context)
     {
@@ -151,12 +188,13 @@ public static class PlatformServiceExtensions
         services.AddSingleton<InternalTokenService>();
         services.AddSingleton<PlatformMetrics>();
 
-        var validationKey = string.IsNullOrWhiteSpace(auth.SigningKey)
-            ? "invalid-missing-internal-auth-signing-key"
-            : auth.SigningKey;
+        var validationKey = Encoding.UTF8.GetByteCount(auth.SigningKey) >= 32
+            ? auth.SigningKey
+            : "invalid-missing-internal-auth-signing-key-32-bytes";
         services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(options =>
             {
+                options.MapInboundClaims = false;
                 options.TokenValidationParameters = new TokenValidationParameters
                 {
                     ValidateIssuer = true,
@@ -166,10 +204,18 @@ public static class PlatformServiceExtensions
                     ValidateIssuerSigningKey = true,
                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(validationKey)),
                     ValidateLifetime = true,
-                    ClockSkew = TimeSpan.FromSeconds(30)
+                    ClockSkew = TimeSpan.FromSeconds(30),
+                    NameClaimType = JwtRegisteredClaimNames.Sub
                 };
             });
-        services.AddAuthorization();
+        services.AddAuthorization(options =>
+        {
+            options.DefaultPolicy = new AuthorizationPolicyBuilder()
+                .RequireAuthenticatedUser()
+                .RequireClaim(JwtRegisteredClaimNames.Sub)
+                .RequireClaim(TenantClaims.ClaimType)
+                .Build();
+        });
         return services;
     }
 
