@@ -68,10 +68,9 @@ public sealed class RedisOutboundDeliveryStore(
             end
             return 0
             """;
-        await connection.GetDatabase().ScriptEvaluateAsync(
-            script,
-            [BuildKey(tenantId, idempotencyKey)],
-            [PendingValue]);
+        var keys = new RedisKey[] { BuildKey(tenantId, idempotencyKey) };
+        var values = new RedisValue[] { PendingValue };
+        await connection.GetDatabase().ScriptEvaluateAsync(script, keys, values);
     }
 
     private static RedisKey BuildKey(string tenantId, string idempotencyKey)
