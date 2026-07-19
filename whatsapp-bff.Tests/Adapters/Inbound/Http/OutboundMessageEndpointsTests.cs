@@ -98,6 +98,7 @@ public class OutboundMessageEndpointsTests : IClassFixture<WebApplicationFactory
 
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TestAuth.IssueToken());
+        client.DefaultRequestHeaders.Add("X-Tenant-Id", TestAuth.TenantId);
         return client;
     }
 }

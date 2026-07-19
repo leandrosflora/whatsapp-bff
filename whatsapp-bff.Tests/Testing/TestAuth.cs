@@ -16,6 +16,7 @@ public static class TestAuth
     public const string SigningKey = "test-only-internal-auth-signing-key-32-bytes-min";
     public const string Issuer = "conversational-ai-platform";
     public const string Audience = "whatsapp-bff";
+    public const string TenantId = "00000000-0000-0000-0000-000000000001";
 
     public static void ConfigureSigningKey(IWebHostBuilder builder) =>
         builder.UseSetting("InternalAuth:SigningKey", SigningKey);
@@ -26,7 +27,11 @@ public static class TestAuth
         var token = new JwtSecurityToken(
             issuer: Issuer,
             audience: Audience,
-            claims: [new Claim(JwtRegisteredClaimNames.Sub, "test-caller")],
+            claims:
+            [
+                new Claim(JwtRegisteredClaimNames.Sub, "test-caller"),
+                new Claim("tenant_id", TenantId)
+            ],
             notBefore: now,
             expires: now.AddMinutes(5),
             signingCredentials: new SigningCredentials(
