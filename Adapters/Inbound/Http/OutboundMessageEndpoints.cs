@@ -59,7 +59,7 @@ public static class OutboundMessageEndpoints
             });
         }
 
-        OutboundSendResult result;
+        SendOutboundMessageResult result;
         try
         {
             result = await useCase.ExecuteAsync(request, cancellationToken);
