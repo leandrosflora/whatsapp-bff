@@ -1,8 +1,10 @@
+using System.Text;
 using Confluent.Kafka;
 using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Options;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
+using StackExchange.Redis;
 using whatsapp_bff.Adapters.Inbound.Http;
 using whatsapp_bff.Adapters.Inbound.Http.Mapping;
 using whatsapp_bff.Adapters.Inbound.Messaging;
@@ -37,6 +39,8 @@ builder.Services.AddOptions<KafkaOptions>()
     .Bind(builder.Configuration.GetSection(KafkaOptions.SectionName));
 builder.Services.AddOptions<OtelOptions>()
     .Bind(builder.Configuration.GetSection(OtelOptions.SectionName));
+builder.Services.AddOptions<RedisOptions>()
+    .Bind(builder.Configuration.GetSection(RedisOptions.SectionName));
 
 var otelEndpoint = builder.Configuration.GetSection(OtelOptions.SectionName).Get<OtelOptions>()?.OtlpEndpoint
     ?? "http://localhost:4317";
@@ -52,15 +56,21 @@ builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<IMessageDedupeStore, MemoryCacheMessageDedupeStore>();
 builder.Services.AddSingleton<IWhatsAppPayloadMapper, WhatsAppPayloadMapper>();
 builder.Services.AddSingleton<IOutboundMessageTracker, InMemoryOutboundMessageTracker>();
+builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RedisOptions>>().Value;
+    return ConnectionMultiplexer.Connect(options.ConnectionString);
+});
+builder.Services.AddSingleton<IOutboundDeliveryStore, RedisOutboundDeliveryStore>();
 
 builder.Services.AddHttpClient<IOrchestratorClient, OrchestratorClient>((sp, client) =>
     {
         var options = sp.GetRequiredService<IOptions<OrchestratorOptions>>().Value;
         client.BaseAddress = new Uri(options.BaseUrl);
-        client.DefaultRequestHeaders.TryAddWithoutValidation("X-Tenant-Id", options.TenantId);
     })
     .AddHttpMessageHandler(sp => new InternalAuthHandler(
         sp.GetRequiredService<InternalTokenService>(),
+        sp.GetRequiredService<IOptions<OrchestratorOptions>>(),
         "conversation-orchestrator"))
     .AddStandardResilienceHandler(options =>
     {
@@ -126,14 +136,20 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UsePlatformServices();
 app.MapPlatformEndpoints();
-app.MapGet("/health/ready", (
+app.MapGet("/health/ready", async (
     IAdminClient adminClient,
-    IOptions<InternalAuthOptions> authOptions) =>
+    IConnectionMultiplexer redis,
+    IOptions<InternalAuthOptions> authOptions,
+    IOptions<OrchestratorOptions> orchestratorOptions) =>
 {
     var failures = new List<string>();
-    if (string.IsNullOrWhiteSpace(authOptions.Value.SigningKey))
+    if (Encoding.UTF8.GetByteCount(authOptions.Value.SigningKey) < 32)
     {
-        failures.Add("internal_auth_signing_key_missing");
+        failures.Add("internal_auth_signing_key_invalid");
+    }
+    if (!TenantClaims.TryNormalize(orchestratorOptions.Value.TenantId, out _))
+    {
+        failures.Add("channel_tenant_invalid");
     }
     try
     {
@@ -142,6 +158,14 @@ app.MapGet("/health/ready", (
     catch
     {
         failures.Add("kafka_unavailable");
+    }
+    try
+    {
+        await redis.GetDatabase().PingAsync();
+    }
+    catch
+    {
+        failures.Add("redis_unavailable");
     }
 
     return failures.Count == 0
