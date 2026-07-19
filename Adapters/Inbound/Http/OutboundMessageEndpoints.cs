@@ -51,31 +51,55 @@ public static class OutboundMessageEndpoints
         }
         if (lease.Status == OutboundDeliveryAcquireStatus.InProgress)
         {
-            return Results.Conflict(new { error = "Outbound delivery is already in progress.", retryable = true });
+            return Results.Conflict(new
+            {
+                error = "Outbound delivery is already in progress or has an ambiguous outcome.",
+                retryable = false,
+                reconciliationRequired = true
+            });
+        }
+
+        OutboundSendResult result;
+        try
+        {
+            result = await useCase.ExecuteAsync(request, cancellationToken);
+        }
+        catch
+        {
+            // Once the provider call started, its outcome may be ambiguous. Keep the Redis
+            // reservation instead of allowing an automatic duplicate send.
+            throw;
+        }
+
+        if (!result.Success || string.IsNullOrWhiteSpace(result.MessageId))
+        {
+            // Fail closed: the provider may have accepted the message even when the client
+            // observed an error. The reservation expires only after the long pending TTL and
+            // should normally be reconciled by an operator before that point.
+            return Results.Json(
+                new
+                {
+                    error = result.ErrorMessage ?? "Outbound delivery outcome is ambiguous.",
+                    reconciliationRequired = true
+                },
+                statusCode: StatusCodes.Status502BadGateway);
         }
 
         try
         {
-            var result = await useCase.ExecuteAsync(request, cancellationToken);
-            if (!result.Success || string.IsNullOrWhiteSpace(result.MessageId))
-            {
-                await deliveryStore.ReleaseAsync(tenantId, idempotencyKey, CancellationToken.None);
-                return Results.Problem(
-                    detail: result.ErrorMessage,
-                    statusCode: StatusCodes.Status502BadGateway);
-            }
-
             await deliveryStore.CompleteAsync(
                 tenantId,
                 idempotencyKey,
                 result.MessageId,
                 cancellationToken);
-            return Results.Accepted(value: new { messageId = result.MessageId });
         }
         catch
         {
-            await deliveryStore.ReleaseAsync(tenantId, idempotencyKey, CancellationToken.None);
+            // Do not release: the WhatsApp API already returned a messageId. Releasing here
+            // would permit the Outbox dispatcher to send the same customer reply again.
             throw;
         }
+
+        return Results.Accepted(value: new { messageId = result.MessageId });
     }
 }
