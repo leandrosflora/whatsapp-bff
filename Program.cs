@@ -57,10 +57,10 @@ builder.Services.AddHttpClient<IOrchestratorClient, OrchestratorClient>((sp, cli
     {
         var options = sp.GetRequiredService<IOptions<OrchestratorOptions>>().Value;
         client.BaseAddress = new Uri(options.BaseUrl);
-        client.DefaultRequestHeaders.TryAddWithoutValidation("X-Tenant-Id", options.TenantId);
     })
     .AddHttpMessageHandler(sp => new InternalAuthHandler(
         sp.GetRequiredService<InternalTokenService>(),
+        sp.GetRequiredService<IOptions<OrchestratorOptions>>(),
         "conversation-orchestrator"))
     .AddStandardResilienceHandler(options =>
     {
@@ -128,12 +128,17 @@ app.UsePlatformServices();
 app.MapPlatformEndpoints();
 app.MapGet("/health/ready", (
     IAdminClient adminClient,
-    IOptions<InternalAuthOptions> authOptions) =>
+    IOptions<InternalAuthOptions> authOptions,
+    IOptions<OrchestratorOptions> orchestratorOptions) =>
 {
     var failures = new List<string>();
-    if (string.IsNullOrWhiteSpace(authOptions.Value.SigningKey))
+    if (Encoding.UTF8.GetByteCount(authOptions.Value.SigningKey) < 32)
     {
-        failures.Add("internal_auth_signing_key_missing");
+        failures.Add("internal_auth_signing_key_invalid");
+    }
+    if (!TenantClaims.TryNormalize(orchestratorOptions.Value.TenantId, out _))
+    {
+        failures.Add("channel_tenant_invalid");
     }
     try
     {
