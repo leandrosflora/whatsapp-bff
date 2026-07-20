@@ -58,6 +58,40 @@ public class WhatsAppCloudApiClient(
         }
     }
 
+    public async Task SendTypingIndicatorAsync(string incomingMessageId, CancellationToken cancellationToken)
+    {
+        var whatsAppOptions = options.Value;
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{whatsAppOptions.PhoneNumberId}/messages")
+        {
+            Content = JsonContent.Create(new WhatsAppTypingIndicatorRequest
+            {
+                Status = "read",
+                MessageId = incomingMessageId,
+                TypingIndicator = new WhatsAppTypingIndicatorType()
+            })
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", whatsAppOptions.AccessToken);
+
+        try
+        {
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                var error = TryParseError(body);
+                logger.LogWarning(
+                    "WhatsApp Cloud API rejected typing indicator for {MessageId}: {Error}",
+                    incomingMessageId,
+                    error?.Message ?? body);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to send typing indicator for {MessageId}", incomingMessageId);
+        }
+    }
+
     private static WhatsAppErrorDetail? TryParseError(string body)
     {
         try

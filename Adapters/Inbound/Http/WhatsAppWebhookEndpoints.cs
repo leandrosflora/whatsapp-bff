@@ -38,6 +38,7 @@ public static class WhatsAppWebhookEndpoints
         IOptions<WhatsAppOptions> whatsAppOptions,
         IMessageDedupeStore dedupeStore,
         IChannelEventPublisher eventPublisher,
+        IWhatsAppCloudApiClient whatsAppClient,
         ILogger<InboundWebhookLogCategory> logger,
         CancellationToken cancellationToken)
     {
@@ -112,6 +113,22 @@ public static class WhatsAppWebhookEndpoints
         }
 
         logger.LogInformation("Persisted raw webhook delivery to Kafka");
+
+        // Show "typing..." to the customer immediately instead of only after the Orchestrator/Agent
+        // Runtime chain sends the actual reply several seconds later. Best-effort: the delivery is
+        // already durably recorded above, so a failure here must never turn the ack into a 5xx.
+        try
+        {
+            foreach (var messageId in reservation.AcquiredMessageIds)
+            {
+                await whatsAppClient.SendTypingIndicatorAsync(messageId, cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to send WhatsApp typing indicator after persisting the webhook delivery");
+        }
+
         return Results.Ok();
     }
 

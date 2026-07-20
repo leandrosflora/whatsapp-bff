@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Moq;
 using whatsapp_bff.Application.Ports.Outbound;
+using whatsapp_bff.Tests.Adapters.Outbound.Http;
 using whatsapp_bff.Tests.Adapters.Outbound.Messaging;
 using Xunit;
 
@@ -22,6 +23,7 @@ public class WhatsAppWebhookEndpointsTests : IClassFixture<WebApplicationFactory
 
     private readonly WebApplicationFactory<Program> _factory;
     private readonly FakeChannelEventPublisher _publisher = new();
+    private readonly FakeWhatsAppCloudApiClient _whatsAppClient = new();
 
     public WhatsAppWebhookEndpointsTests(WebApplicationFactory<Program> factory)
     {
@@ -40,6 +42,9 @@ public class WhatsAppWebhookEndpointsTests : IClassFixture<WebApplicationFactory
             {
                 services.RemoveAll<IChannelEventPublisher>();
                 services.AddSingleton<IChannelEventPublisher>(_publisher);
+
+                services.RemoveAll<IWhatsAppCloudApiClient>();
+                services.AddSingleton<IWhatsAppCloudApiClient>(_whatsAppClient);
 
                 // KafkaWebhookConsumerService (a hosted BackgroundService) starts for every test
                 // host. Swap the real broker-backed consumer for one that just idles until
@@ -140,6 +145,43 @@ public class WhatsAppWebhookEndpointsTests : IClassFixture<WebApplicationFactory
 
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        Assert.Single(_publisher.RawWebhookEvents);
+    }
+
+    [Fact]
+    public async Task Webhook_ValidSignature_SendsTypingIndicatorForTheNewMessage()
+    {
+        var client = _factory.CreateClient();
+        var body = BuildTextMessagePayload("wamid.typing-1");
+
+        var response = await PostSignedAsync(client, body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(["wamid.typing-1"], _whatsAppClient.TypingIndicatorMessageIds);
+    }
+
+    [Fact]
+    public async Task Webhook_DuplicateMessageId_SendsTypingIndicatorOnlyOnFirstDelivery()
+    {
+        var client = _factory.CreateClient();
+        var body = BuildTextMessagePayload("wamid.typing-duplicate");
+
+        await PostSignedAsync(client, body);
+        await PostSignedAsync(client, body);
+
+        Assert.Equal(["wamid.typing-duplicate"], _whatsAppClient.TypingIndicatorMessageIds);
+    }
+
+    [Fact]
+    public async Task Webhook_TypingIndicatorFails_StillReturnsOkAndKeepsKafkaPublish()
+    {
+        _whatsAppClient.ThrowOnTypingIndicator = true;
+        var client = _factory.CreateClient();
+        var body = BuildTextMessagePayload("wamid.typing-failure");
+
+        var response = await PostSignedAsync(client, body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Single(_publisher.RawWebhookEvents);
     }
 
