@@ -33,6 +33,7 @@ public class OutboundMessageEndpointsTests : IClassFixture<WebApplicationFactory
         var publisher = new Mock<IChannelEventPublisher>();
 
         var client = CreateClient(whatsAppClient.Object, tracker.Object, publisher.Object);
+        client.DefaultRequestHeaders.Add("Idempotency-Key", "idem-sent-1");
 
         var response = await client.PostAsJsonAsync(
             "/internal/messages", new OutboundChannelMessage { To = "5511999990000", Type = "text", Text = "hello" });
@@ -67,6 +68,7 @@ public class OutboundMessageEndpointsTests : IClassFixture<WebApplicationFactory
         var publisher = new Mock<IChannelEventPublisher>();
 
         var client = CreateClient(whatsAppClient.Object, Mock.Of<IOutboundMessageTracker>(), publisher.Object);
+        client.DefaultRequestHeaders.Add("Idempotency-Key", "idem-failed-1");
 
         var response = await client.PostAsJsonAsync(
             "/internal/messages", new OutboundChannelMessage { To = "5511999990000", Type = "text", Text = "hello" });
