@@ -143,9 +143,14 @@ app.MapGet("/health/ready", async (
     IOptions<OrchestratorOptions> orchestratorOptions) =>
 {
     var failures = new List<string>();
-    if (Encoding.UTF8.GetByteCount(authOptions.Value.SigningKey) < 32)
+    var auth = authOptions.Value;
+    if (!InternalAuthOptions.HasValidSecret(auth.OutboundSecrets.GetValueOrDefault("conversation-orchestrator")))
     {
-        failures.Add("internal_auth_signing_key_invalid");
+        failures.Add("internal_auth_outbound_secret_invalid:conversation-orchestrator");
+    }
+    if (!InternalAuthOptions.HasValidSecret(auth.InboundSecrets.GetValueOrDefault("conversation-orchestrator")))
+    {
+        failures.Add("internal_auth_inbound_secret_invalid:conversation-orchestrator");
     }
     if (!TenantClaims.TryNormalize(orchestratorOptions.Value.TenantId, out _))
     {

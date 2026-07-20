@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using JsonWebToken = Microsoft.IdentityModel.JsonWebTokens.JsonWebToken;
 using whatsapp_bff.Configuration;
 
 namespace whatsapp_bff.Platform;
@@ -17,8 +18,12 @@ public sealed class InternalAuthOptions
     public const string SectionName = "InternalAuth";
     public string Issuer { get; init; } = "conversational-ai-platform";
     public string ServiceName { get; init; } = "whatsapp-bff";
-    public string SigningKey { get; init; } = string.Empty;
+    public Dictionary<string, string> OutboundSecrets { get; init; } = new();
+    public Dictionary<string, string> InboundSecrets { get; init; } = new();
     public int TokenTtlSeconds { get; init; } = 300;
+
+    public static bool HasValidSecret(string? secret) =>
+        !string.IsNullOrEmpty(secret) && Encoding.UTF8.GetByteCount(secret) >= 32;
 }
 
 public static class TenantClaims
@@ -51,9 +56,10 @@ public sealed class InternalTokenService(IOptions<InternalAuthOptions> options)
     public string CreateToken(string audience, string tenantId)
     {
         var value = options.Value;
-        if (Encoding.UTF8.GetByteCount(value.SigningKey) < 32)
+        if (!value.OutboundSecrets.TryGetValue(audience, out var secret) || !InternalAuthOptions.HasValidSecret(secret))
         {
-            throw new InvalidOperationException("InternalAuth:SigningKey must contain at least 32 UTF-8 bytes.");
+            throw new InvalidOperationException(
+                $"InternalAuth:OutboundSecrets:{audience} must be configured with at least 32 UTF-8 bytes.");
         }
         if (!TenantClaims.TryNormalize(tenantId, out var canonicalTenant))
         {
@@ -62,20 +68,24 @@ public sealed class InternalTokenService(IOptions<InternalAuthOptions> options)
 
         var now = DateTime.UtcNow;
         var credentials = new SigningCredentials(
-            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(value.SigningKey)),
+            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret)),
             SecurityAlgorithms.HmacSha256);
-        var token = new JwtSecurityToken(
+        var header = new JwtHeader(credentials);
+        header["kid"] = value.ServiceName;
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, value.ServiceName),
+            new(TenantClaims.ClaimType, canonicalTenant),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("n"))
+        };
+        var payload = new JwtPayload(
             issuer: value.Issuer,
             audience: audience,
-            claims:
-            [
-                new Claim(JwtRegisteredClaimNames.Sub, value.ServiceName),
-                new Claim(TenantClaims.ClaimType, canonicalTenant),
-                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("n"))
-            ],
+            claims: claims,
             notBefore: now,
             expires: now.AddSeconds(Math.Clamp(value.TokenTtlSeconds, 30, 900)),
-            signingCredentials: credentials);
+            issuedAt: null);
+        var token = new JwtSecurityToken(header, payload);
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 }
@@ -188,9 +198,6 @@ public static class PlatformServiceExtensions
         services.AddSingleton<InternalTokenService>();
         services.AddSingleton<PlatformMetrics>();
 
-        var validationKey = Encoding.UTF8.GetByteCount(auth.SigningKey) >= 32
-            ? auth.SigningKey
-            : "invalid-missing-internal-auth-signing-key-32-bytes";
         services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(options =>
             {
@@ -202,10 +209,45 @@ public static class PlatformServiceExtensions
                     ValidateAudience = true,
                     ValidAudience = auth.ServiceName,
                     ValidateIssuerSigningKey = true,
-                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(validationKey)),
+                    IssuerSigningKeyResolver = (token, securityToken, kid, parameters) =>
+                    {
+                        if (kid is null
+                            || !auth.InboundSecrets.TryGetValue(kid, out var secret)
+                            || !InternalAuthOptions.HasValidSecret(secret))
+                        {
+                            return Array.Empty<SecurityKey>();
+                        }
+                        return new SecurityKey[] { new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret)) };
+                    },
                     ValidateLifetime = true,
                     ClockSkew = TimeSpan.FromSeconds(30),
                     NameClaimType = JwtRegisteredClaimNames.Sub
+                };
+                options.Events = new JwtBearerEvents
+                {
+                    OnTokenValidated = context =>
+                    {
+                        var metrics = context.HttpContext.RequestServices.GetRequiredService<PlatformMetrics>();
+                        var kid = context.SecurityToken switch
+                        {
+                            JsonWebToken jsonWebToken => jsonWebToken.Kid,
+                            JwtSecurityToken legacyToken => legacyToken.Header.Kid,
+                            _ => null
+                        };
+                        var sub = context.Principal?.FindFirstValue(JwtRegisteredClaimNames.Sub);
+                        if (kid is null || !string.Equals(kid, sub, StringComparison.Ordinal))
+                        {
+                            metrics.Increment("internal_auth_validation_failures_total", ("reason", "kid_sub_mismatch"));
+                            context.Fail("kid/sub mismatch");
+                        }
+                        return Task.CompletedTask;
+                    },
+                    OnAuthenticationFailed = context =>
+                    {
+                        var metrics = context.HttpContext.RequestServices.GetRequiredService<PlatformMetrics>();
+                        metrics.Increment("internal_auth_validation_failures_total", ("reason", "token_invalid"));
+                        return Task.CompletedTask;
+                    }
                 };
             });
         services.AddAuthorization(options =>
