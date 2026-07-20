@@ -41,6 +41,27 @@ public class WhatsAppErrorResponse
     public WhatsAppErrorDetail? Error { get; set; }
 }
 
+public class WhatsAppTypingIndicatorRequest
+{
+    [JsonPropertyName("messaging_product")]
+    public string MessagingProduct { get; init; } = "whatsapp";
+
+    [JsonPropertyName("status")]
+    public required string Status { get; init; }
+
+    [JsonPropertyName("message_id")]
+    public required string MessageId { get; init; }
+
+    [JsonPropertyName("typing_indicator")]
+    public required WhatsAppTypingIndicatorType TypingIndicator { get; init; }
+}
+
+public class WhatsAppTypingIndicatorType
+{
+    [JsonPropertyName("type")]
+    public string Type { get; init; } = "text";
+}
+
 public class WhatsAppErrorDetail
 {
     [JsonPropertyName("code")]
