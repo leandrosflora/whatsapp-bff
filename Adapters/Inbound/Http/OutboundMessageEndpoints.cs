@@ -34,6 +34,17 @@ public static class OutboundMessageEndpoints
         {
             return Results.BadRequest(new { error = "'to' and 'text' are required." });
         }
+        if (request.Type == "interactive")
+        {
+            if (request.Buttons is null || request.Buttons.Count == 0)
+            {
+                return Results.BadRequest(new { error = "'buttons' is required for an interactive message." });
+            }
+            if (request.Buttons.Count > 3)
+            {
+                return Results.BadRequest(new { error = "WhatsApp interactive button messages support at most 3 buttons." });
+            }
+        }
 
         var idempotencyKey = httpContext.Request.Headers["Idempotency-Key"].ToString();
         if (string.IsNullOrWhiteSpace(idempotencyKey))

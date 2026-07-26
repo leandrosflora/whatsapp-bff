@@ -81,6 +81,77 @@ public class OutboundMessageEndpointsTests : IClassFixture<WebApplicationFactory
             Times.Once);
     }
 
+    [Fact]
+    public async Task Send_InteractivePayload_ReturnsAcceptedAndCallsSendInteractiveButtons()
+    {
+        var whatsAppClient = new Mock<IWhatsAppCloudApiClient>();
+        whatsAppClient
+            .Setup(c => c.SendInteractiveButtonsAsync(
+                "5511999990000", "Escolha uma opção", It.IsAny<IReadOnlyList<OutboundButton>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new WhatsAppSendResult(true, "wamid.menu-1", null, null));
+        var tracker = new Mock<IOutboundMessageTracker>();
+
+        var client = CreateClient(whatsAppClient.Object, tracker.Object, Mock.Of<IChannelEventPublisher>());
+        client.DefaultRequestHeaders.Add("Idempotency-Key", "idem-menu-1");
+
+        var response = await client.PostAsJsonAsync(
+            "/internal/messages",
+            new OutboundChannelMessage
+            {
+                To = "5511999990000",
+                Type = "interactive",
+                Text = "Escolha uma opção",
+                Buttons = [new OutboundButton("skill_a", "Opção A"), new OutboundButton("skill_b", "Opção B")]
+            });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        tracker.Verify(t => t.MarkSent("wamid.menu-1"), Times.Once);
+    }
+
+    [Fact]
+    public async Task Send_InteractivePayloadWithoutButtons_ReturnsBadRequestWithoutCallingWhatsAppApi()
+    {
+        var whatsAppClient = new Mock<IWhatsAppCloudApiClient>();
+        var client = CreateClient(whatsAppClient.Object, Mock.Of<IOutboundMessageTracker>(), Mock.Of<IChannelEventPublisher>());
+        client.DefaultRequestHeaders.Add("Idempotency-Key", "idem-menu-2");
+
+        var response = await client.PostAsJsonAsync(
+            "/internal/messages",
+            new OutboundChannelMessage { To = "5511999990000", Type = "interactive", Text = "Escolha uma opção" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        whatsAppClient.Verify(
+            c => c.SendInteractiveButtonsAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<OutboundButton>>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task Send_InteractivePayloadWithTooManyButtons_ReturnsBadRequest()
+    {
+        var whatsAppClient = new Mock<IWhatsAppCloudApiClient>();
+        var client = CreateClient(whatsAppClient.Object, Mock.Of<IOutboundMessageTracker>(), Mock.Of<IChannelEventPublisher>());
+        client.DefaultRequestHeaders.Add("Idempotency-Key", "idem-menu-3");
+
+        var response = await client.PostAsJsonAsync(
+            "/internal/messages",
+            new OutboundChannelMessage
+            {
+                To = "5511999990000",
+                Type = "interactive",
+                Text = "Escolha uma opção",
+                Buttons =
+                [
+                    new OutboundButton("a", "A"),
+                    new OutboundButton("b", "B"),
+                    new OutboundButton("c", "C"),
+                    new OutboundButton("d", "D")
+                ]
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     private HttpClient CreateClient(
         IWhatsAppCloudApiClient whatsAppClient, IOutboundMessageTracker tracker, IChannelEventPublisher publisher)
     {

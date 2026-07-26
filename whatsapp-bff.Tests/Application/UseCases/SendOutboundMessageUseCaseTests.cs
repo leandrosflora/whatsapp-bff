@@ -51,6 +51,36 @@ public class SendOutboundMessageUseCaseTests
             Times.Once);
     }
 
+    [Fact]
+    public async Task ExecuteAsync_InteractiveType_CallsSendInteractiveButtonsNotSendText()
+    {
+        var whatsAppClient = new Mock<IWhatsAppCloudApiClient>();
+        var buttons = new List<OutboundButton> { new("skill_a", "Opção A"), new("skill_b", "Opção B") };
+        whatsAppClient
+            .Setup(c => c.SendInteractiveButtonsAsync(
+                "5511999990000", "Escolha uma opção", buttons, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new WhatsAppSendResult(true, "wamid.menu-1", null, null));
+        var tracker = new Mock<IOutboundMessageTracker>();
+        var useCase = CreateUseCase(whatsAppClient.Object, tracker.Object, Mock.Of<IChannelEventPublisher>());
+
+        var result = await useCase.ExecuteAsync(
+            new OutboundChannelMessage
+            {
+                To = "5511999990000",
+                Type = "interactive",
+                Text = "Escolha uma opção",
+                Buttons = buttons
+            },
+            CancellationToken.None);
+
+        Assert.True(result.Success);
+        Assert.Equal("wamid.menu-1", result.MessageId);
+        tracker.Verify(t => t.MarkSent("wamid.menu-1"), Times.Once);
+        whatsAppClient.Verify(
+            c => c.SendTextMessageAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
     private static SendOutboundMessageUseCase CreateUseCase(
         IWhatsAppCloudApiClient whatsAppClient, IOutboundMessageTracker tracker, IChannelEventPublisher publisher) =>
         new(whatsAppClient, tracker, publisher, NullLogger<SendOutboundMessageUseCase>.Instance);

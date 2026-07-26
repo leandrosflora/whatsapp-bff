@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using whatsapp_bff.Application.Ports.Outbound;
 using whatsapp_bff.Configuration;
+using whatsapp_bff.Domain;
 
 namespace whatsapp_bff.Adapters.Outbound.Http;
 
@@ -12,18 +13,48 @@ public class WhatsAppCloudApiClient(
     IOptions<WhatsAppOptions> options,
     ILogger<WhatsAppCloudApiClient> logger) : IWhatsAppCloudApiClient
 {
-    public async Task<WhatsAppSendResult> SendTextMessageAsync(string to, string text, CancellationToken cancellationToken)
+    public Task<WhatsAppSendResult> SendTextMessageAsync(string to, string text, CancellationToken cancellationToken) =>
+        SendMessageAsync(
+            to,
+            new WhatsAppSendMessageRequest
+            {
+                To = to,
+                Type = "text",
+                Text = new WhatsAppSendMessageText { Body = text }
+            },
+            cancellationToken);
+
+    public Task<WhatsAppSendResult> SendInteractiveButtonsAsync(
+        string to, string bodyText, IReadOnlyList<OutboundButton> buttons, CancellationToken cancellationToken) =>
+        SendMessageAsync(
+            to,
+            new WhatsAppSendInteractiveRequest
+            {
+                To = to,
+                Interactive = new WhatsAppInteractivePayload
+                {
+                    Body = new WhatsAppInteractiveBody { Text = bodyText },
+                    Action = new WhatsAppInteractiveAction
+                    {
+                        Buttons = buttons
+                            .Select(b => new WhatsAppInteractiveButton
+                            {
+                                Reply = new WhatsAppInteractiveButtonReply { Id = b.Id, Title = b.Title }
+                            })
+                            .ToList()
+                    }
+                }
+            },
+            cancellationToken);
+
+    private async Task<WhatsAppSendResult> SendMessageAsync<TRequest>(
+        string to, TRequest payload, CancellationToken cancellationToken)
     {
         var whatsAppOptions = options.Value;
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{whatsAppOptions.PhoneNumberId}/messages")
         {
-            Content = JsonContent.Create(new WhatsAppSendMessageRequest
-            {
-                To = to,
-                Type = "text",
-                Text = new WhatsAppSendMessageText { Body = text }
-            })
+            Content = JsonContent.Create(payload)
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", whatsAppOptions.AccessToken);
 
