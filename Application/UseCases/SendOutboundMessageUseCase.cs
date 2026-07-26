@@ -12,7 +12,9 @@ public class SendOutboundMessageUseCase(
 {
     public async Task<SendOutboundMessageResult> ExecuteAsync(OutboundChannelMessage request, CancellationToken cancellationToken)
     {
-        var result = await whatsAppClient.SendTextMessageAsync(request.To, request.Text!, cancellationToken);
+        var result = request.Type == "interactive"
+            ? await whatsAppClient.SendInteractiveButtonsAsync(request.To, request.Text!, request.Buttons!, cancellationToken)
+            : await whatsAppClient.SendTextMessageAsync(request.To, request.Text!, cancellationToken);
 
         if (result is { Success: true, WhatsAppMessageId: not null })
         {
