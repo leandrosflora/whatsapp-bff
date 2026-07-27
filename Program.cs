@@ -140,7 +140,8 @@ app.MapGet("/health/ready", async (
     IAdminClient adminClient,
     IConnectionMultiplexer redis,
     IOptions<InternalAuthOptions> authOptions,
-    IOptions<OrchestratorOptions> orchestratorOptions) =>
+    IOptions<OrchestratorOptions> orchestratorOptions,
+    IOptions<KafkaOptions> kafkaOptions) =>
 {
     var failures = new List<string>();
     var auth = authOptions.Value;
@@ -171,6 +172,32 @@ app.MapGet("/health/ready", async (
     catch
     {
         failures.Add("redis_unavailable");
+    }
+
+    // GetMetadata above only proves the broker is reachable, not that
+    // KafkaWebhookConsumerService's own consumer is still an active group member - it can go
+    // quiet (state Empty/Dead, e.g. after a broker hiccup its rejoin never completes) while the
+    // rest of the process, including this endpoint, keeps responding normally. That happened
+    // in production-adjacent testing: the group sat with zero members and raw webhooks piled up
+    // unprocessed for tens of minutes before anyone noticed.
+    try
+    {
+        var groupId = kafkaOptions.Value.WebhookConsumerGroupId;
+        var report = await adminClient.DescribeConsumerGroupsAsync([groupId]);
+        var description = report.ConsumerGroupDescriptions.SingleOrDefault(d => d.GroupId == groupId);
+        if (description is null
+            || description.Error.IsError
+            || description.State is not (ConsumerGroupState.Stable
+                or ConsumerGroupState.PreparingRebalance
+                or ConsumerGroupState.CompletingRebalance)
+            || description.Members.Count == 0)
+        {
+            failures.Add("kafka_webhook_consumer_group_inactive");
+        }
+    }
+    catch
+    {
+        failures.Add("kafka_webhook_consumer_group_inactive");
     }
 
     return failures.Count == 0
