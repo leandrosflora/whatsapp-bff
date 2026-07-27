@@ -24,7 +24,7 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: csharp
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
       - uses: github/codeql-action/autobuild@v4
@@ -67,7 +67,7 @@ jobs:
 
       - name: Review dependency changes
         if: steps.dependency_graph.outputs.available == 'true'
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high
 
@@ -186,13 +186,13 @@ jobs:
 
       - name: Attest image provenance
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: image.tar
 
       - name: Attest image SBOM
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        uses: actions/attest-sbom@v3
+        uses: actions/attest-sbom@v4
         with:
           subject-path: image.tar
           sbom-path: image-sbom.spdx.json
