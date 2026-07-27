@@ -33,10 +33,41 @@ jobs:
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/dependency-review-action@v4
+
+      - name: Detect Dependency Graph availability
+        id: dependency_graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          status=$(curl --silent --show-error --location \
+            --output /tmp/dependency-diff.json \
+            --write-out '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/dependency-graph/compare/$BASE_SHA...$HEAD_SHA")
+          case "$status" in
+            200)
+              echo "available=true" >> "$GITHUB_OUTPUT"
+              ;;
+            403|404)
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Dependency Graph/Dependency Review is unavailable; Trivy remains blocking."
+              ;;
+            *)
+              cat /tmp/dependency-diff.json >&2 || true
+              echo "Unexpected Dependency Graph response: HTTP $status" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Review dependency changes
+        if: steps.dependency_graph.outputs.available == 'true'
+        uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
 
@@ -46,6 +77,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Scan source and dependencies
+        id: source_scan
+        continue-on-error: true
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
@@ -65,9 +98,15 @@ jobs:
           category: trivy-source
 
       - name: Build immutable local image
+        id: image_build
+        if: always()
+        continue-on-error: true
         run: docker build --pull --tag "local/${{ github.event.repository.name }}:${{ github.sha }}" .
 
       - name: Scan built image
+        id: image_scan
+        if: always() && steps.image_build.outcome == 'success'
+        continue-on-error: true
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: local/${{ github.event.repository.name }}:${{ github.sha }}
@@ -78,7 +117,7 @@ jobs:
           exit-code: "1"
 
       - name: Upload image SARIF
-        if: always() && github.actor != 'dependabot[bot]'
+        if: always() && steps.image_build.outcome == 'success' && github.actor != 'dependabot[bot]'
         continue-on-error: ${{ github.event.repository.private }}
         uses: github/codeql-action/upload-sarif@v4
         with:
@@ -86,7 +125,9 @@ jobs:
           category: trivy-image
 
       - name: Generate source SBOM
+        id: source_sbom
         if: always()
+        continue-on-error: true
         uses: anchore/sbom-action@v0
         with:
           path: .
@@ -94,7 +135,9 @@ jobs:
           output-file: source-sbom.spdx.json
 
       - name: Generate image SBOM
-        if: always()
+        id: image_sbom
+        if: always() && steps.image_build.outcome == 'success'
+        continue-on-error: true
         uses: anchore/sbom-action@v0
         with:
           image: local/${{ github.event.repository.name }}:${{ github.sha }}
@@ -102,7 +145,9 @@ jobs:
           output-file: image-sbom.spdx.json
 
       - name: Package image and checksums
-        if: always()
+        id: package
+        if: always() && steps.image_build.outcome == 'success' && steps.source_sbom.outcome == 'success' && steps.image_sbom.outcome == 'success'
+        continue-on-error: true
         run: |
           docker save "local/${{ github.event.repository.name }}:${{ github.sha }}" -o image.tar
           sha256sum image.tar source-sbom.spdx.json image-sbom.spdx.json > SHA256SUMS
@@ -121,6 +166,23 @@ jobs:
             image-sbom.spdx.json
             image.tar
             SHA256SUMS
+
+      - name: Enforce supply-chain gates
+        if: always()
+        env:
+          SOURCE_SCAN: ${{ steps.source_scan.outcome }}
+          IMAGE_BUILD: ${{ steps.image_build.outcome }}
+          IMAGE_SCAN: ${{ steps.image_scan.outcome }}
+          SOURCE_SBOM: ${{ steps.source_sbom.outcome }}
+          IMAGE_SBOM: ${{ steps.image_sbom.outcome }}
+          PACKAGE: ${{ steps.package.outcome }}
+        run: |
+          test "$SOURCE_SCAN" = "success"
+          test "$IMAGE_BUILD" = "success"
+          test "$IMAGE_SCAN" = "success"
+          test "$SOURCE_SBOM" = "success"
+          test "$IMAGE_SBOM" = "success"
+          test "$PACKAGE" = "success"
 
       - name: Attest image provenance
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
